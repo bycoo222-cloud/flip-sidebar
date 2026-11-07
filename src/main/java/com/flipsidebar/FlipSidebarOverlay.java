@@ -65,6 +65,10 @@ class FlipSidebarOverlay extends OverlayPanel
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
+		if (!config.showFlipBox() || plugin.guidanceOff())
+		{
+			return null;              // paused: no box (the panel says Paused)
+		}
 		FlipSidebarPlugin.Modify m = plugin.modifying();
 		if (m != null)
 		{
@@ -78,7 +82,18 @@ class FlipSidebarOverlay extends OverlayPanel
 			return null;
 		}
 
-		panelComponent.getChildren().add(TitleComponent.builder().text("Flip Sidebar").color(ORANGE).build());
+		// the mode in the title too (user: "make it more obvios if your in flip or alch mode")
+		panelComponent.getChildren().add(TitleComponent.builder()
+			.text(config.alchMode() ? "Flip Sidebar - High alch" : "Flip Sidebar")
+			.color(config.alchMode() ? AMBER : ORANGE).build());
+		// one step at a time: an offer to cancel / re-price comes before the card's next offer (the highlight shows it)
+		OfferAdvice first = own == null && plugin.isGeOpen() && plugin.setupItem() <= 0 ? plugin.nextOfferStep() : null;
+		if (first != null)
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("First: " + FlipSidebarPlugin.stepText(first))
+				.leftColor(OfferAdvice.CANCEL.equals(first.verdict) ? RED : OfferAdvice.COLLECT.equals(first.verdict) ? GREEN : AMBER).build());
+		}
 
 		if (!("BUY".equals(s.action) || "SELL".equals(s.action)))
 		{
@@ -107,8 +122,9 @@ class FlipSidebarOverlay extends OverlayPanel
 		{
 			panelComponent.getChildren().add(LineComponent.builder().left("Your pick").leftColor(AMBER).build());
 		}
+		boolean toAlch = buy && s.note != null && s.note.startsWith("High alch:");      // High alch mode's buy
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left(buy ? "Buy" : "Sell").leftColor(buy ? GREEN : ORANGE)
+			.left(toAlch ? "Buy to alch" : buy ? "Buy" : "Sell").leftColor(toAlch ? AMBER : buy ? GREEN : ORANGE)
 			.right(s.name == null ? "?" : s.name).build());
 		if (buy)
 		{
@@ -118,7 +134,8 @@ class FlipSidebarOverlay extends OverlayPanel
 			if (lim != null)
 			{
 				panelComponent.getChildren().add(LineComponent.builder()
-					.left("Limit left").right(number.format(lim[0]) + " / " + number.format(lim[1]))
+					// short ("11k / 11k"): "11,000 / 11,000" wrapped onto two lines in the box (in-game 2026-10-31)
+					.left("Limit left").right(FlipBrain.gp(lim[0]) + " / " + FlipBrain.gp(lim[1]))
 					.rightColor(lim[0] == 0 ? RED : Color.WHITE).build());
 				if (lim[2] > 0)
 				{
@@ -142,6 +159,12 @@ class FlipSidebarOverlay extends OverlayPanel
 				.left("Profit").right((s.profit >= 0 ? "+" : "") + number.format(s.profit))
 				.rightColor(s.profit >= 0 ? GREEN : RED).build());
 		}
+		if (buy && s.likely != Long.MIN_VALUE && s.likely < s.profit)    // at the last hour's average sell price (Pick.likely)
+		{
+			panelComponent.getChildren().add(LineComponent.builder()
+				.left("Likely").right((s.likely >= 0 ? "+" : "") + number.format(s.likely))
+				.rightColor(s.likely > 0 ? GREEN : ORANGE).build());
+		}
 		if (s.manual && s.note != null && !s.note.isEmpty())
 		{
 			panelComponent.getChildren().add(LineComponent.builder().left(s.note).leftColor(ORANGE).build());
@@ -164,7 +187,7 @@ class FlipSidebarOverlay extends OverlayPanel
 			.left(m.target <= 0 ? "Modify" : m.target > m.oldPrice ? "Raise" : "Lower").leftColor(AMBER)
 			.right((m.buy ? "Buy " : "Sell ") + (m.name == null ? "?" : m.name)).build());
 		panelComponent.getChildren().add(LineComponent.builder()
-			.left("Quantity").right(number.format(m.quantity)).rightColor(YELLOW).build());
+			.left("Quantity").right(number.format(plugin.setupQuantity(m.quantity, !m.buy, m.itemId))).rightColor(YELLOW).build());
 		panelComponent.getChildren().add(LineComponent.builder()
 			.left("Price").right(m.target > 0 ? number.format(m.target) : "your choice").rightColor(YELLOW).build());
 		panelComponent.getChildren().add(LineComponent.builder()

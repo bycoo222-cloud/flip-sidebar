@@ -31,14 +31,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
-/**
- * An item's price history for the chart. With "Live prices" on, the plugin builds it from the
- * OSRS Wiki itself ({@link #of}); otherwise the Flip Sidebar writes it to {@code chart.json} when
- * the plugin asks with {@code chart_request.json}.
- */
+/** An item's price history for the charts, built from the OSRS Wiki's prices ({@link #of}). */
 class PriceHistory
 {
-	/** Range -> [wiki timestep, seconds shown] — the sidebar's flip_history.RANGES. */
+	/** Range -> [wiki timestep, seconds shown]. */
 	static final Map<String, Object[]> RANGES = Map.of(
 		"1d", new Object[]{"5m", 86400L},
 		"1w", new Object[]{"1h", 7 * 86400L},
@@ -48,10 +44,13 @@ class PriceHistory
 	int itemId;
 	/** "1d", "1w", "1m" or "1y". */
 	String range;
-	/** Each point is [epoch seconds, average insta-buy, average insta-sell]; 0 = no trade then. */
+	/**
+	 * Each point is [epoch seconds, average insta-buy, average insta-sell, insta-buy volume,
+	 * insta-sell volume] — a price of 0 = no trade then.
+	 */
 	long[][] points;
 	Latest latest;
-	/** When the sidebar wrote this, epoch seconds. */
+	/** When this was built, epoch seconds. */
 	long written;
 
 	/** From the wiki's /timeseries data and /latest record for the item. */
@@ -65,7 +64,8 @@ class PriceHistory
 			long ts = Research.num(p, "timestamp");
 			if (ts >= cut)
 			{
-				pts.add(new long[]{ts, Research.num(p, "avgHighPrice"), Research.num(p, "avgLowPrice")});
+				pts.add(new long[]{ts, Research.num(p, "avgHighPrice"), Research.num(p, "avgLowPrice"),
+					Research.num(p, "highPriceVolume"), Research.num(p, "lowPriceVolume")});
 			}
 		}
 		PriceHistory h = new PriceHistory();

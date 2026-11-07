@@ -33,7 +33,7 @@ import java.util.List;
 
 /**
  * What an item's last ~30 hours of 5-minute trades say — stability, margin, trend and flow.
- * A port of the sidebar's flip_research.research_item; every field is measured, none guessed.
+ * Every field is measured, none guessed.
  */
 class Research
 {
@@ -50,10 +50,29 @@ class Research
 	int sampled;
 	double trendPct;
 	boolean trendKnown;
+	/**
+	 * The last hour's average insta-buy: the 12 five-minute blocks before the newest one (the card's own), 6+ with
+	 * trades; 0 = not known. FlipEngine.judge: a buy priced at it is not a flip (HOUR_ASK_MAX).
+	 */
+	long hourAsk;
+	/** The item's 30-day level (FlipEngine.monthLevel), set by the caller; 0 = not known or a new item. */
+	long monthLevel;
 	/** Units instant-SOLD per hour — what your BUY offer eats. */
 	long buyFlowHr;
 	/** Units instant-BOUGHT per hour — what your SELL offer eats. */
 	long sellFlowHr;
+	/**
+	 * Units instant-SOLD (what a buy offer eats) and instant-BOUGHT (what a sell eats) in the last 2 hours of the series
+	 * (the 24 five-minute blocks up to its newest) — counted even when the series is too thin for the rest of the
+	 * research: an expensive item trades a few times an hour (FlipEngine.judgeDear).
+	 */
+	long instaSells2h;
+	long instaBuys2h;
+	/**
+	 * The median 5-minute insta-sell average of the last 24 hours of the series (blocks with insta-sells, 24+ of them),
+	 * 0 = too few — what FlipEngine.DAY_PREMIUM_MAX_PCT judges a bid against.
+	 */
+	long daySellMedian;
 
 	/** Minutes for {@code qty} to fill at the recent pace; infinite when nothing is flowing. */
 	double fillMinutes(long qty, boolean buySide)
@@ -66,16 +85,59 @@ class Research
 	{
 		Research r = new Research();
 		List<long[]> pts = new ArrayList<>();          // [ts, high, low, highVol, lowVol]
+		List<long[]> highs = new ArrayList<>();        // [ts, high] — any block with insta-buys
+		long newest = 0;
 		for (JsonElement e : series)
 		{
 			JsonObject p = e.getAsJsonObject();
 			long hi = num(p, "avgHighPrice");
 			long lo = num(p, "avgLowPrice");
+			newest = Math.max(newest, num(p, "timestamp"));
+			if (hi > 0)
+			{
+				highs.add(new long[]{num(p, "timestamp"), hi});
+			}
 			if (hi > 0 && lo > 0)
 			{
 				pts.add(new long[]{num(p, "timestamp"), hi, lo, num(p, "highPriceVolume"), num(p, "lowPriceVolume")});
 			}
 		}
+		for (JsonElement e : series)
+		{
+			JsonObject p = e.getAsJsonObject();
+			if (newest - num(p, "timestamp") < 24 * 300)
+			{
+				r.instaSells2h += num(p, "lowPriceVolume");
+				r.instaBuys2h += num(p, "highPriceVolume");
+			}
+		}
+		List<Long> dayLows = new ArrayList<>();
+		for (JsonElement e : series)
+		{
+			JsonObject p = e.getAsJsonObject();
+			long lo = num(p, "avgLowPrice");
+			if (lo > 0 && newest - num(p, "timestamp") < 288 * 300)
+			{
+				dayLows.add(lo);
+			}
+		}
+		if (dayLows.size() >= 24)
+		{
+			java.util.Collections.sort(dayLows);
+			int m = dayLows.size();
+			r.daySellMedian = m % 2 == 1 ? dayLows.get(m / 2) : (dayLows.get(m / 2 - 1) + dayLows.get(m / 2)) / 2;
+		}
+		long sum = 0;
+		int n = 0;
+		for (long[] h : highs)
+		{
+			if (h[0] < newest && newest - h[0] <= 12 * 300)
+			{
+				sum += h[1];
+				n++;
+			}
+		}
+		r.hourAsk = n >= 6 ? sum / n : 0;
 		r.buckets = pts.size();
 		if (r.buckets < 12)
 		{
@@ -149,6 +211,7 @@ class Research
 	static long num(JsonObject o, String key)
 	{
 		JsonElement e = o.get(key);
-		return e == null || e.isJsonNull() ? 0 : e.getAsLong();
+		// v2 averages may have two decimals (1.60.47): rounded, never cut (getAsLong cut 213.83 to 213)
+		return e == null || e.isJsonNull() ? 0 : Math.round(e.getAsDouble());
 	}
 }

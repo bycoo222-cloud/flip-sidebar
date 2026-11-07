@@ -37,6 +37,7 @@ import java.awt.geom.Path2D;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.Map;
 import java.util.List;
 import javax.inject.Inject;
 import net.runelite.api.Client;
@@ -53,12 +54,14 @@ import net.runelite.client.ui.overlay.OverlayPosition;
  * A price chart on the chat box while an item is open in the offer set-up screen:
  * insta-buy (green) and insta-sell (red) over 1 day / week / month / year, the latest of each
  * with its age, and dashed lines for your offer and the card's buy / sell prices.
- * The numbers come from live prices or the Flip Sidebar program (see PriceHistory); this class
- * only draws.
+ * The numbers come from live prices (see PriceHistory); this class only draws.
  */
 class FlipSidebarChartOverlay extends Overlay
 {
 	static final String[] RANGES = {"1d", "1w", "1m", "1y"};
+	/** Each range's step (PriceHistory.RANGES), for the volume legend. */
+	private static final Map<String, String> VOLUME_STEP = Map.of("1d", "per 5 min", "1w", "per hour",
+		"1m", "per 6 hours", "1y", "per day");
 
 	/** Size beside the GE window; on the chat box the chart takes the chat box's size. */
 	private static final int HEIGHT = 190;
@@ -92,6 +95,8 @@ class FlipSidebarChartOverlay extends Overlay
 	private final FlipSidebarConfig config;
 	/** Where the range buttons were last drawn — read by the mouse listener (another thread). */
 	private volatile Rectangle[] buttons = new Rectangle[0];
+	/** Where the Price / Volume buttons were last drawn (same). */
+	private volatile Rectangle[] modes = new Rectangle[0];
 	/** The chat box's message area the last time it was open — the chart's spot when it is closed. */
 	private Rectangle lastChat;
 
@@ -107,7 +112,17 @@ class FlipSidebarChartOverlay extends Overlay
 				{
 					plugin.setChartRange(RANGES[i]);
 					e.consume();      // a click on the chart's button must not also click the game
-					break;
+					return e;
+				}
+			}
+			Rectangle[] m = modes;
+			for (int i = 0; i < m.length; i++)
+			{
+				if (m[i] != null && m[i].contains(e.getPoint()))
+				{
+					plugin.setChartVolume(i == 1);
+					e.consume();
+					return e;
 				}
 			}
 			return e;
@@ -133,17 +148,14 @@ class FlipSidebarChartOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D g)
 	{
-		int item = config.priceChart() ? plugin.setupItem() : -1;
+		// prices come only from Live prices: with it off there is no chart at all
+		int item = config.priceChart() && config.livePrices() ? plugin.setupItem() : -1;
 		Rectangle ge = item > 0 ? plugin.geBounds() : null;
-		if (ge == null)
-		{
-			buttons = new Rectangle[0];
-			return null;
-		}
-		Rectangle area = place(ge);
+		Rectangle area = ge == null ? null : place(ge);
 		if (area == null)
 		{
 			buttons = new Rectangle[0];
+			modes = new Rectangle[0];
 			return null;
 		}
 		int x = area.x;
@@ -173,16 +185,36 @@ class FlipSidebarChartOverlay extends Overlay
 			bx += 27;
 		}
 		buttons = b;
+		// Price / Volume (user, 2026-10-31, of this chart: "i want it here too")
+		boolean volume = plugin.isChartVolume();
+		String[] modeNames = {"Price", "Volume"};
+		Rectangle[] m = new Rectangle[2];
+		bx += 8;
+		for (int i = 0; i < 2; i++)
+		{
+			boolean on = (i == 1) == volume;
+			int bw = fm.stringWidth(modeNames[i]) + 10;
+			m[i] = new Rectangle(bx, y + PAD, bw, 14);
+			g.setColor(on ? BUTTON_ON : BUTTON);
+			g.fill(m[i]);
+			g.setColor(on ? Color.BLACK : TEXT);
+			g.drawString(modeNames[i], bx + 5, y + PAD + 11);
+			bx += bw + 3;
+		}
+		modes = m;
 
 		PriceHistory h = plugin.getHistory();
 		if (h == null || h.itemId != item || !range.equals(h.range) || h.points == null || h.points.length < 2)
 		{
 			g.setColor(DIM);
-			boolean live = config.livePrices();
-			g.drawString(plugin.historyWaitedLong()
-				? (live ? "No prices yet - the OSRS Wiki has not answered" : "No prices yet - is the Flip Sidebar running?")
-				: (live ? "Loading prices..." : "Loading prices from the Flip Sidebar..."),
+			g.drawString(plugin.historyWaitedLong() ? "No prices yet - the OSRS Wiki has not answered" : "Loading prices...",
 				bx + 8, y + PAD + 11);
+			return null;
+		}
+
+		if (volume)
+		{
+			drawVolume(g, h, x, y, w, height, fm);
 			return null;
 		}
 
@@ -272,11 +304,14 @@ class FlipSidebarChartOverlay extends Overlay
 		dashed(g, offer, OFFER, "your offer", false, cx, cy, cw, ch, min, max, fm);
 		if (cardItem)
 		{
-			dashed(g, s.price, CARD_BUY, "SELL".equals(s.action) ? "sell at" : "buy at", true,
-				cx, cy, cw, ch, min, max, fm);
-			if ("BUY".equals(s.action))
+			// the sell line says what the flip makes each after tax (user, 2026-10-31: "in the graphs with
+			// buy and sell it should be saying expected profit")
+			String each = s.quantity > 0 && s.profit != 0 ? String.format(" (%+,d each)", s.profit / s.quantity) : "";
+			boolean sell = "SELL".equals(s.action);
+			dashed(g, s.price, CARD_BUY, sell ? "sell at" + each : "buy at", true, cx, cy, cw, ch, min, max, fm);
+			if (!sell)
 			{
-				dashed(g, s.sellPrice, CARD_SELL, "sell at", true, cx, cy, cw, ch, min, max, fm);
+				dashed(g, s.sellPrice, CARD_SELL, "sell at" + each, true, cx, cy, cw, ch, min, max, fm);
 			}
 		}
 		g.setStroke(new BasicStroke(1f));
@@ -407,6 +442,69 @@ class FlipSidebarChartOverlay extends Overlay
 		g.setColor(c);
 		g.drawLine(cx, py, cx + cw, py);
 		g.drawString(label, right ? cx + cw - 3 - fm.stringWidth(label) : cx + 3, py - 2);
+	}
+
+	/** Volume view: a bar per step, insta-sold (red) under insta-bought (green), a count axis. */
+	private static void drawVolume(Graphics2D g, PriceHistory h, int x, int y, int w, int height, FontMetrics fm)
+	{
+		long most = 0;
+		for (long[] p : h.points)
+		{
+			most = Math.max(most, at(p, 3) + at(p, 4));
+		}
+		String per = VOLUME_STEP.getOrDefault(h.range, "");
+		g.setColor(HIGH);
+		String bought = "Insta-bought " + per;
+		g.drawString(bought, x + w - PAD - fm.stringWidth(bought), y + PAD + 9);
+		g.setColor(LOW);
+		String sold = "Insta-sold " + per;
+		g.drawString(sold, x + w - PAD - fm.stringWidth(sold), y + PAD + 20);
+		if (most <= 0)
+		{
+			g.setColor(DIM);
+			g.drawString("No trades in this range", x + PAD, y + 40);
+			return;
+		}
+		long step = niceStep(most / 4.0);
+		long max = ((most + step - 1) / step) * step;
+		int cx = x + AXIS;
+		int cy = y + PAD + 26;
+		int cw = w - AXIS - PAD;
+		int ch = height - (cy - y) - 16;
+		long t0 = h.points[0][0];
+		long t1 = Math.max(t0 + 1, h.points[h.points.length - 1][0]);
+		for (long v = 0; v <= max; v += step)
+		{
+			int gy = cy + ch - (int) (ch * v / max);
+			g.setColor(GRID);
+			g.drawLine(cx, gy, cx + cw, gy);
+			g.setColor(DIM);
+			String lab = v >= 10_000 ? (v / 1000) + "k" : fmt(v);      // "80,000" was cut off at the left edge
+			g.drawString(lab, cx - 4 - fm.stringWidth(lab), gy + 4);
+		}
+		double slot = (double) cw / h.points.length;
+		int bw = Math.max(1, (int) slot - (slot >= 3 ? 1 : 0));
+		for (long[] p : h.points)
+		{
+			int px = cx + (int) ((double) cw * (p[0] - t0) / (t1 - t0)) - bw / 2;
+			int soldH = (int) (ch * at(p, 4) / max);
+			int boughtH = (int) (ch * (at(p, 3) + at(p, 4)) / max) - soldH;
+			g.setColor(LOW);
+			g.fillRect(px, cy + ch - soldH, bw, soldH);
+			g.setColor(HIGH);
+			g.fillRect(px, cy + ch - soldH - boughtH, bw, boughtH);
+		}
+		SimpleDateFormat f = new SimpleDateFormat("1d".equals(h.range) ? "HH:mm" : "MMM d");
+		g.setColor(DIM);
+		g.drawString(f.format(new Date(t0 * 1000)), cx, cy + ch + 12);
+		String end = f.format(new Date(t1 * 1000));
+		g.drawString(end, cx + cw - fm.stringWidth(end), cy + ch + 12);
+	}
+
+	/** A point's field {@code k}, 0 when it has none (volumes are fields 3 and 4). */
+	private static long at(long[] p, int k)
+	{
+		return p.length > k ? p[k] : 0;
 	}
 
 	/** A round step (1, 2 or 5 × a power of ten) close to {@code raw}. */

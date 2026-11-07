@@ -10,3 +10,8 @@ nbproject/
 *.class
 # personal dev launcher (paths on this PC)
 run-dev.sh
+stop-dev.sh
+
+# the Data sync server (team-sync/): never its packages or local state
+team-sync/node_modules/
+team-sync/.wrangler/

@@ -69,6 +69,8 @@ class FlipSidebarHighlightOverlay extends Overlay
 	private static final Color CANCEL_EDGE = new Color(255, 60, 60, 230);
 	private static final Color RAISE_FILL = new Color(255, 176, 0, 70);
 	private static final Color RAISE_EDGE = new Color(255, 176, 0, 230);
+	private static final Color COLLECT_FILL = new Color(80, 220, 100, 70);
+	private static final Color COLLECT_EDGE = new Color(80, 220, 100, 230);
 	/** Right-click options on an offer, which the buttons inside an open offer also carry. */
 	private static final String ABORT = "Abort";
 	private static final String MODIFY = "Modify";
@@ -88,6 +90,8 @@ class FlipSidebarHighlightOverlay extends Overlay
 	 * game's own scripts and have no named constants, so they are addressed by index.
 	 */
 	private static final int SETUP_ITEM_SEARCH = 0;
+	/** A sell offer's "All" quantity button (Flipping Copilot's GrandExchange.getSetQuantityAllButton). */
+	private static final int SETUP_QUANTITY_ALL = 50;
 	private static final int SETUP_QUANTITY_CUSTOM = 51;
 	private static final int SETUP_PRICE_CUSTOM = 54;
 	private static final int SETUP_CONFIRM = 58;
@@ -97,6 +101,13 @@ class FlipSidebarHighlightOverlay extends Overlay
 	private final Client client;
 	private final FlipSidebarPlugin plugin;
 	private final FlipSidebarConfig config;
+	/**
+	 * The set-up screen's item and its quantity when "All" was first lit there (-1 = none): once the quantity has moved
+	 * off that and is still not right, the "..." button instead — All is never lit in a loop (the 2026-11-02 Quantity
+	 * loop: 1,738 tries at a number the game would not take).
+	 */
+	private int allItem = -1;
+	private int allFromQuantity;
 
 	@Inject
 	FlipSidebarHighlightOverlay(Client client, FlipSidebarPlugin plugin, FlipSidebarConfig config)
@@ -112,17 +123,18 @@ class FlipSidebarHighlightOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D g)
 	{
-		if (!config.highlight() || !plugin.isGeOpen())
+		if (!config.highlight() || plugin.guidanceOff() || !plugin.isGeOpen())
 		{
-			return null;
+			return null;              // paused: nothing highlighted at all
 		}
-		drawOfferActions(g);
 		FlipSidebarPlugin.Modify m = plugin.modifying();
 		if (m != null)
 		{
 			drawModify(g, m);         // re-placing an offer: the card's highlights would lead away from it
 			return null;
 		}
+		// ONE step at a time: a cancel, else a re-price, before the card's next offer is started
+		boolean offerFirst = drawOfferActions(g);
 		Suggestion s = plugin.getSuggestion();
 		boolean cardOffer = s != null && ("BUY".equals(s.action) || "SELL".equals(s.action));
 		boolean buy = cardOffer && "BUY".equals(s.action);
@@ -145,6 +157,11 @@ class FlipSidebarHighlightOverlay extends Overlay
 		Widget confirm = setup == null ? null : setup.getChild(SETUP_CONFIRM);
 		if (confirm == null || confirm.isHidden())
 		{
+			allItem = -1;             // set-up closed: the next one may use All again
+			if (offerFirst)
+			{
+				return null;          // the offer to cancel / re-price first; the card's next offer after it
+			}
 			if (s != null && "COLLECT".equals(s.action))
 			{
 				draw(g, withOption(client.getWidget(InterfaceID.GeOffers.COLLECTALL), COLLECT));
@@ -184,11 +201,19 @@ class FlipSidebarHighlightOverlay extends Overlay
 	/** Quantity "..." and price "..." until they match, then Confirm. */
 	private void drawFill(Graphics2D g, Widget setup, Widget confirm, Suggestion o)
 	{
-		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == o.quantity;
+		if (plugin.settling())
+		{
+			return;                   // the number just entered is not on the set-up screen yet
+		}
+		// a sell asks for no more than is held (FlipSidebarPlugin.setupQuantity) — the game does not take more, and
+		// this would never match
+		boolean sell = "SELL".equals(o.action);
+		long want = plugin.setupQuantity(o.quantity, sell, o.itemId);
+		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == want;
 		boolean priceOk = client.getVarpLongValue(VarPlayerID.GE_NEWOFFER_PRICE) == o.price;
 		if (!quantityOk)
 		{
-			draw(g, setup.getChild(SETUP_QUANTITY_CUSTOM));
+			draw(g, quantityButton(setup, sell, o.itemId, want));
 		}
 		if (!priceOk)
 		{
@@ -201,37 +226,51 @@ class FlipSidebarHighlightOverlay extends Overlay
 	}
 
 	/**
-	 * Offers to act on: red to cancel, amber to raise — the slot while the 8 slots are on screen;
-	 * once one is opened, its abort (X) or Modify button. Those buttons have no named component, so
-	 * they are found by their own right-click option — the game's text, not a guessed position.
+	 * The ONE offer to act on now — green to collect (a finished or cancelled offer: its slot, then once opened its coin
+	 * and item boxes), red to cancel, amber to re-price — every collect first, then every cancel, then every RAISE /
+	 * LOWER, then the card's next offer (user, 2026-11-01: "if i have 1 cancel 3 adjusts and a buy right it would show just the
+	 * red cancel. then it would move direcltly to one of the adjusts and then it would cylce threw all the adjusts to
+	 * the but offer. not show them all at once. itll confuse people"). The slot while the 8 slots are on screen (for a
+	 * collect, the Collect button at the top right — every finished offer at once); once
+	 * an offer is opened, its abort (X) or Modify button. Those buttons have no named component, so they are found by
+	 * their own right-click option — the game's text, not a guessed position. True while one is waiting.
 	 */
-	private void drawOfferActions(Graphics2D g)
+	private boolean drawOfferActions(Graphics2D g)
 	{
 		Set<Integer> cancel = plugin.cancelSlots();
 		Set<Integer> raise = plugin.adjustSlots();
-		if (cancel.isEmpty() && raise.isEmpty())
+		// an offer is OPEN and finished or cancelled: its coins and items to collect, before anything else
+		Widget box = client.getWidget(InterfaceID.GeOffers.DETAILS_COLLECT);
+		if (box != null && !box.isHidden())
 		{
-			return;
-		}
-		boolean slotsShown = false;
-		for (int slot = 1; slot <= SLOTS.length; slot++)
-		{
-			boolean c = cancel.contains(slot);
-			if (!c && !raise.contains(slot))
+			int open = client.getVarbitValue(VarbitID.GE_SELECTEDSLOT);
+			GrandExchangeOffer[] all = client.getGrandExchangeOffers();
+			GrandExchangeOffer o = all == null || open < 1 || open > all.length ? null : all[open - 1];
+			if (o != null && finished(o.getState()))
 			{
-				continue;
-			}
-			Widget w = client.getWidget(SLOTS[slot - 1]);
-			if (w != null && !w.isHidden())
-			{
-				slotsShown = true;
-				draw(g, w, c ? CANCEL_FILL : RAISE_FILL, c ? CANCEL_EDGE : RAISE_EDGE);
+				drawCollect(g, box);
+				return true;
 			}
 		}
-		if (slotsShown)
+		OfferAdvice step = plugin.nextOfferStep();
+		int next = step == null ? 0 : step.offer.slot;
+		if (next < 1 || next > SLOTS.length)
 		{
-			return;
+			return false;
 		}
+		boolean collect = OfferAdvice.COLLECT.equals(step.verdict);
+		boolean c = cancel.contains(next);
+		Widget w = client.getWidget(SLOTS[next - 1]);
+		if (w != null && !w.isHidden())
+		{
+			// a collect: the Collect button at the top right takes every finished offer in one click (user, 2026-11-01:
+			// "its faster the clicking each offer when multiple finish at once") — the slot only when it is not shown
+			Widget all = collect ? withOption(client.getWidget(InterfaceID.GeOffers.COLLECTALL), COLLECT) : null;
+			draw(g, all != null ? all : w, collect ? COLLECT_FILL : c ? CANCEL_FILL : RAISE_FILL,
+				collect ? COLLECT_EDGE : c ? CANCEL_EDGE : RAISE_EDGE);
+			return true;
+		}
+		// an offer is open: its own button when it is one to act on (the user may take them in any order)
 		int open = client.getVarbitValue(VarbitID.GE_SELECTEDSLOT);
 		Widget root = client.getWidget(InterfaceID.GeOffers.UNIVERSE);
 		if (cancel.contains(open))
@@ -241,6 +280,34 @@ class FlipSidebarHighlightOverlay extends Overlay
 		else if (raise.contains(open))
 		{
 			draw(g, withOption(root, MODIFY), RAISE_FILL, RAISE_EDGE);
+		}
+		return true;
+	}
+
+	private static boolean finished(GrandExchangeOfferState st)
+	{
+		return st == GrandExchangeOfferState.BOUGHT || st == GrandExchangeOfferState.SOLD
+			|| st == GrandExchangeOfferState.CANCELLED_BUY || st == GrandExchangeOfferState.CANCELLED_SELL;
+	}
+
+	/** The coin and item boxes of an open offer, green; the whole collect area when they cannot be told apart. */
+	private void drawCollect(Graphics2D g, Widget box)
+	{
+		boolean any = false;
+		for (Widget[] kids : new Widget[][]{box.getDynamicChildren(), box.getStaticChildren(), box.getNestedChildren()})
+		{
+			for (Widget c : kids == null ? new Widget[0] : kids)
+			{
+				if (c != null && !c.isHidden() && c.getItemId() > 0)
+				{
+					draw(g, c, COLLECT_FILL, COLLECT_EDGE);
+					any = true;
+				}
+			}
+		}
+		if (!any)
+		{
+			draw(g, box, COLLECT_FILL, COLLECT_EDGE);
 		}
 	}
 
@@ -252,24 +319,49 @@ class FlipSidebarHighlightOverlay extends Overlay
 	private void drawModify(Graphics2D g, FlipSidebarPlugin.Modify m)
 	{
 		Widget setup = client.getWidget(InterfaceID.GeOffers.SETUP);
-		if (setup == null)
+		if (setup == null || plugin.settling())
 		{
-			return;
+			return;                   // settling: the number just entered is not on the set-up screen yet
 		}
 		boolean priceOk = m.target <= 0 || client.getVarpLongValue(VarPlayerID.GE_NEWOFFER_PRICE) == m.target;
-		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == m.quantity;
+		long want = plugin.setupQuantity(m.quantity, !m.buy, m.itemId);
+		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == want;
 		if (!priceOk)
 		{
 			draw(g, setup.getChild(SETUP_PRICE_CUSTOM), RAISE_FILL, RAISE_EDGE);
 		}
 		if (!quantityOk)
 		{
-			draw(g, setup.getChild(SETUP_QUANTITY_CUSTOM), RAISE_FILL, RAISE_EDGE);
+			draw(g, quantityButton(setup, !m.buy, m.itemId, want), RAISE_FILL, RAISE_EDGE);
 		}
 		if (priceOk && quantityOk)
 		{
 			draw(g, setup.getChild(SETUP_CONFIRM), RAISE_FILL, RAISE_EDGE);
 		}
+	}
+
+	/**
+	 * The quantity button to light: "All" for a sell of everything held — one click, nothing to type (user, 2026-11-03:
+	 * "instead of me typing the quanity how about we click the all button ... were going to be selling all of that item";
+	 * Flipping Copilot does the same, its HighlightController.highlightQuantity) — else "...". All only until the
+	 * quantity moves off what it was when All was lit (allItem).
+	 */
+	private Widget quantityButton(Widget setup, boolean sell, int itemId, long want)
+	{
+		int now = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY);
+		if (sell && want > 0 && want == plugin.heldCount(itemId))
+		{
+			if (allItem != itemId || now <= 1)
+			{
+				allItem = itemId;     // 0 or 1: not set by anything yet (a new set-up starts there)
+				allFromQuantity = now;
+			}
+			if (now == allFromQuantity)
+			{
+				return setup.getChild(SETUP_QUANTITY_ALL);
+			}
+		}
+		return setup.getChild(SETUP_QUANTITY_CUSTOM);
 	}
 
 	/** The visible widget under {@code w} with a right-click option starting with {@code option}. */
@@ -308,11 +400,11 @@ class FlipSidebarHighlightOverlay extends Overlay
 		return null;
 	}
 
-	/** The Buy / Sell arrow of the first empty slot that is on screen. */
+	/** The Buy / Sell arrow of the first empty slot that is on screen — of the 3 a free-to-play account has, in that mode. */
 	private Widget emptySlotArrow(boolean buy)
 	{
 		GrandExchangeOffer[] offers = client.getGrandExchangeOffers();
-		for (int i = 0; i < SLOTS.length; i++)
+		for (int i = 0; i < Math.min(SLOTS.length, FlipSidebarConfig.geSlots(config)); i++)
 		{
 			GrandExchangeOffer o = offers == null || i >= offers.length ? null : offers[i];
 			if (o != null && o.getState() != GrandExchangeOfferState.EMPTY)

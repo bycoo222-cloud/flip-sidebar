@@ -1,0 +1,10 @@
+# Flip Sidebar team sync — Cloudflare Worker + D1 (free tier). Deploy: see README.md.
+name = "flip-sidebar-team"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "flip-sidebar-team"
+database_id = "a9ec83fd-a69d-47fb-8469-5adf8136e4c7"
+

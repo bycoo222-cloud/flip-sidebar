@@ -29,6 +29,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import javax.inject.Inject;
 import okhttp3.Call;
@@ -46,9 +48,22 @@ import okhttp3.ResponseBody;
  */
 class WikiPrices
 {
-	private static final String BASE = "https://prices.runescape.wiki/api/v1/osrs";
+	private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(WikiPrices.class);
+
+	/**
+	 * The wiki's v2 API (1.60.47; v1 "is still available but may be removed in the future" — RuneScape:Real-time_Prices,
+	 * read 2026-11-07). v2: averages may have two decimals (Research.num rounds them), /timeseries takes a lookback
+	 * (seriesPath) instead of a timestep; /latest, /mapping, /5m, /1h (and their ?timestamp=) as in v1.
+	 */
+	private static final String BASE = "https://prices.runescape.wiki/api/v2/osrs";
 	/** The wiki asks every tool to identify itself. */
-	private static final String USER_AGENT = "Flip Sidebar RuneLite plugin - github.com/bycoo222-cloud/flip-sidebar";
+	/**
+	 * Identifiable, with contact info — the wiki's ask. OSRS Wiki Discord #api-discussion, 2026-11-07 10:16 (Jayden, to the
+	 * user's question about a server that fetches /latest /5m /1h for every plugin user): "This is fine, try and limit to 1
+	 * rps max and use an identifiable user agent with contact info. The pricing data is not under the same license as
+	 * normal wiki content."
+	 */
+	static final String USER_AGENT = "Flip Sidebar RuneLite plugin - github.com/bycoo222-cloud/flip-sidebar - Discord @bycoo222";
 
 	private final OkHttpClient http;
 	private final Gson gson;
@@ -72,22 +87,78 @@ class WikiPrices
 		return get(endpoint).getAsJsonObject().getAsJsonObject("data");
 	}
 
-	/** An item's history in {@code step} buckets ("5m", "1h", "6h", "24h"), oldest first. */
-	JsonArray timeseries(int itemId, String step) throws IOException
+	/** A whole answer: for /5m, {timestamp, data} — the block's start time with every item (MarketMemory). */
+	JsonObject block(String endpoint) throws IOException
 	{
-		return get("/timeseries?timestep=" + step + "&id=" + itemId).getAsJsonObject().getAsJsonArray("data");
+		return get(endpoint).getAsJsonObject();
 	}
 
-	/** The same request on OkHttp's thread pool — for the chart, which must not wait for a scan. */
-	CompletableFuture<JsonElement> getAsync(String path)
+	/**
+	 * An item's history in {@code step} buckets ("5m", "1h", "6h", "24h"), oldest first — CACHED for about one bucket
+	 * (5m: 5 min, 1h: 30 min, 6h: 3 h, 24h: 12 h; 1.60.43): a scan every 3 minutes asked for the same series again and
+	 * the wiki's answer cannot change before its next bucket. At most {@link #SERIES_CACHE} kept, the least used go.
+	 */
+	JsonArray timeseries(int itemId, String step) throws IOException
 	{
-		CompletableFuture<JsonElement> f = new CompletableFuture<>();
-		http.newCall(request(path)).enqueue(new Callback()
+		String path = seriesPath(itemId, step);
+		long now = System.currentTimeMillis();
+		synchronized (series)
+		{
+			Object[] had = series.get(path);
+			if (had != null && now < (long) had[0])
+			{
+				return (JsonArray) had[1];
+			}
+		}
+		JsonArray data = get(path).getAsJsonObject().getAsJsonArray("data");
+		long ttl = "5m".equals(step) ? 5 * 60_000L : "1h".equals(step) ? 30 * 60_000L : "6h".equals(step) ? 3 * 3_600_000L
+			: 12 * 3_600_000L;
+		synchronized (series)
+		{
+			series.put(path, new Object[]{now + ttl, data});
+		}
+		return data;
+	}
+
+	/**
+	 * The v2 /timeseries request for an item in {@code step} buckets: the wiki's own mapping — lookback 24h ≈ 5m buckets,
+	 * 7d ≈ 1h, 6m ≈ 6h, 1y ≈ 24h (checked 2026-11-07: 24h → 288 × 300 s, 1y → 365 × 86,400 s). The bucket size "is NOT
+	 * guaranteed" by the wiki; the answer says its timestep.
+	 */
+	static String seriesPath(int itemId, String step)
+	{
+		String lookback = "5m".equals(step) ? "24h" : "1h".equals(step) ? "7d" : "6h".equals(step) ? "6m" : "1y";
+		return "/timeseries?lookback=" + lookback + "&id=" + itemId;
+	}
+
+	/** Series kept in the cache at most (timeseries). */
+	static final int SERIES_CACHE = 600;
+	private final Map<String, Object[]> series = new LinkedHashMap<String, Object[]>(64, 0.75f, true)
+	{
+		@Override
+		protected boolean removeEldestEntry(Map.Entry<String, Object[]> eldest)
+		{
+			return size() > SERIES_CACHE;
+		}
+	};
+
+	/** The same request on OkHttp's thread pool — for the chart, which must not wait for a scan. */
+	/** One async request to {@code base}; the plugin's server failing falls back to the wiki directly. */
+	private void enqueue(String path, String base, CompletableFuture<JsonElement> f)
+	{
+		http.newCall(request(base, path)).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				f.completeExceptionally(e);
+				if (base.equals(SERVER_BASE))
+				{
+					enqueue(path, BASE, f);
+				}
+				else
+				{
+					f.completeExceptionally(e);
+				}
 			}
 
 			@Override
@@ -99,21 +170,54 @@ class WikiPrices
 				}
 				catch (IOException | RuntimeException e)
 				{
-					f.completeExceptionally(e);
+					if (base.equals(SERVER_BASE))
+					{
+						enqueue(path, BASE, f);
+					}
+					else
+					{
+						f.completeExceptionally(e);
+					}
 				}
 			}
 		});
+	}
+
+	CompletableFuture<JsonElement> getAsync(String path)
+	{
+		CompletableFuture<JsonElement> f = new CompletableFuture<>();
+		enqueue(path, viaServer ? SERVER_BASE : BASE, f);
 		return f;
 	}
 
 	private JsonElement get(String path) throws IOException
 	{
-		return read(path, http.newCall(request(path)).execute());
+		if (viaServer)
+		{
+			try
+			{
+				return read(path, http.newCall(request(SERVER_BASE, path)).execute());
+			}
+			catch (IOException | RuntimeException e)
+			{
+				log.debug("Flip Sidebar: the prices server failed for {} - the wiki directly", path, e);
+			}
+		}
+		return read(path, http.newCall(request(BASE, path)).execute());
 	}
 
-	private Request request(String path)
+	/**
+	 * ⭐ PRICES THROUGH THE PLUGIN'S SERVER (1.60.52; the "serverPrices" setting, off by default): the Worker's cached copy
+	 * of the wiki's v2 API (team-sync /v1/prices/…, edge-cached per period) — the wiki sees about one request a period per
+	 * Cloudflare location instead of one per player. Approved by the wiki 2026-11-07 ("This is fine, try and limit to 1 rps
+	 * max …"). Any failure there: the wiki directly, the same request. Set by FlipSidebarPlugin (rulesTick).
+	 */
+	static volatile boolean viaServer;
+	static final String SERVER_BASE = TeamSync.BASE + "/v1/prices";
+
+	private Request request(String base, String path)
 	{
-		return new Request.Builder().url(BASE + path).header("User-Agent", USER_AGENT).build();
+		return new Request.Builder().url(base + path).header("User-Agent", USER_AGENT).build();
 	}
 
 	private JsonElement read(String path, Response response) throws IOException

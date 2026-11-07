@@ -28,10 +28,12 @@ package com.flipsidebar;
  * How often you come back to re-price your offers. It sets how big a slice of an hour's trading
  * one offer may take: 30m = 0.10 is MEASURED on the user's flips (up to 0.10x of the hour filled
  * in 9-12 minutes; 0.25-0.5x lost money 26% of the time). The others are judgement around it.
+ * 5m was 0.05 until 1.43.0 — half the measured-safe slice; live 2026-11-01 (harness SeqCheck, 8 slots from 150m):
+ * 0.05 30.1m out, +708k a round · 0.083 35.5m, +835k · 0.10 36.9m, +869k (user: "were using very little money").
  */
 public enum AdjustWindow
 {
-	FIVE_MINUTES("5m", 5, 0.05),
+	FIVE_MINUTES("5m", 5, 0.10),
 	THIRTY_MINUTES("30m", 30, 0.10),
 	TWO_HOURS("2h", 120, 0.20),
 	EIGHT_HOURS("8h", 480, 0.25);

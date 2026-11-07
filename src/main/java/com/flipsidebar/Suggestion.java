@@ -24,10 +24,7 @@
  */
 package com.flipsidebar;
 
-/**
- * The flip the sidebar is showing, as written to {@code suggestion.json}. Field names match the
- * JSON keys exactly (Gson maps them by name).
- */
+/** The flip the side panel and the box over the game are showing (the card), or a priced own pick. */
 class Suggestion
 {
 	/** "BUY", "SELL", or "NONE" when there is nothing worth doing. */
@@ -41,14 +38,18 @@ class Suggestion
 	int sellPrice;
 	/** Profit on the whole offer after the GE tax, in coins. */
 	long profit;
+	/** A BUY: what it makes at the last hour's average sell price (Pick.likely); Long.MIN_VALUE = not shown. */
+	long likely = Long.MIN_VALUE;
 	/** Estimated minutes to fill; negative when unknown. */
 	double fillMinutes;
 	/** One short warning, or empty. */
 	String note;
-	/** When the sidebar made this suggestion, epoch seconds. */
+	/** When the brain priced this, epoch seconds. */
 	long asOf;
 	/** True for an item the user picked themselves (FlipBrain.priceItem), not the card. */
 	boolean manual;
 	/** A pick that cannot be placed (its GE buy limit is used up): no highlights, no fill. */
 	boolean discouraged;
+	/** Short, for the GE's number box line: an own pick priced off older trades ("last insta-sell 51m ago"). */
+	String chatNote;
 }
