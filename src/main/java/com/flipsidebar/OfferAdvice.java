@@ -117,6 +117,11 @@ final class OfferAdvice
 	 * "on offers can u squeeze expected proffit somewhere?"). Set by advise.
 	 */
 	long expected = Long.MIN_VALUE;
+	/**
+	 * A buy the market went past the chase cap on (the "not raised" WAIT): the price the cap is counted from (where the
+	 * buy was placed); 0 = not. FlipBrain remembers it for {@link #stayPastCap}.
+	 */
+	long pastCap;
 
 	private OfferAdvice(GameSnapshot.Offer offer, String verdict, long target, String why)
 	{
@@ -298,9 +303,15 @@ final class OfferAdvice
 					FlipSidebarSlotOverlay.clock(quiet), o.price));
 			}
 			OfferAdvice slow = slowBuy(o, market, sellNow, part, cancel, first, slowWindow(o, windowMs), nowMs);
-			return slow != null ? slow : new OfferAdvice(o, WAIT, o.price, String.format("%smarket %+.1f%% - not raised: "
+			if (slow != null)
+			{
+				return slow;
+			}
+			OfferAdvice left = new OfferAdvice(o, WAIT, o.price, String.format("%smarket %+.1f%% - not raised: "
 				+ "a buy is never chased more than 1%% over %,d, where it was placed - wait for it, or cancel it",
 				part, drift * 100, first > 0 ? first : o.price));
+			left.pastCap = first > 0 ? first : o.price;
+			return left;
 		}
 		if (drift >= RAISE_PCT && !o.buy && young && o.loweredFrom > 0 && market <= o.loweredFrom)
 		{
@@ -463,6 +474,33 @@ final class OfferAdvice
 		OfferAdvice c = new OfferAdvice(o, CANCEL, 0, String.format("%s%s - it was told to cancel %d min ago; the price "
 			+ "jumping back up is not chased", part, o.filled > 0 ? "Cancel offer and sell what it bought" : "Cancel offer",
 			Math.max(0, (nowMs - toldAt) / 60_000)));
+		c.expected = a.expected;
+		return c;
+	}
+
+	/**
+	 * ⭐ PAST THE CHASE CAP, A BUY IS NOT RAISED FOR A RE-PRICE WINDOW (1.60.90). {@code seen} = {when its market was last
+	 * past the cap (a {@link #pastCap} WAIT), the price the cap was counted from}, or null. A RAISE on the same buy (same
+	 * cap base, {@code first}; 0 = this offer's price) less than {@code minMs} after that is a WAIT instead. Why: "the
+	 * market now" is the last trade only while it is under 2 minutes old (FlipEngine.LATEST_FRESH_S), then the 5-minute
+	 * average — which runs minutes BEHIND that trade. On an item trading less often than every 2 minutes the reading
+	 * swaps between the two, and when the cap sits between them so does the advice. MEASURED in-game 2026-11-10
+	 * 01:15-01:18 (journal): 11,000 Mahogany logs bid 60 (cap: 61), last insta-sell 62, 5-minute average 61 — RAISE
+	 * "market +1.7% - your bid is behind" and WAIT "+3.3% - not raised" took turns 3 times, twice in one second at
+	 * 01:18:44 as the 62 trade passed 2 minutes old and then a new 62 trade came in. After the window it is judged anew.
+	 */
+	static OfferAdvice stayPastCap(OfferAdvice a, long[] seen, long first, long nowMs, long minMs)
+	{
+		GameSnapshot.Offer o = a.offer;
+		long base = first > 0 ? first : o.price;
+		if (seen == null || !o.buy || !RAISE.equals(a.verdict) || seen[1] != base || nowMs - seen[0] >= minMs)
+		{
+			return a;
+		}
+		String part = o.filled > 0 ? String.format("%,d/%,d filled · ", o.filled, o.total) : "";
+		OfferAdvice c = new OfferAdvice(o, WAIT, o.price, String.format("%snot raised: the market went past the 1%% cap over "
+			+ "%,d (where it was placed) %s ago - wait for it, or cancel it", part, base,
+			FlipSidebarSlotOverlay.clock(nowMs - seen[0])));
 		c.expected = a.expected;
 		return c;
 	}

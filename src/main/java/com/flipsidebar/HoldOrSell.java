@@ -83,6 +83,44 @@ final class HoldOrSell
 	}
 
 	/**
+	 * ⭐ A VERDICT STANDS FOR A RE-PRICE WINDOW (1.60.89). The verdict to show now, given the one shown before
+	 * ({@code prev}, decided at {@code prevSince}) and the one just worked out ({@code next}): a switch between Hold and
+	 * Sell is only taken once the old decision has stood for {@code minMs} — except a Sell because the price fell under the
+	 * week's lowest (a real fall), which is taken at once. Same decision: the new numbers. MEASURED in-game 2026-11-09
+	 * 21:03-21:06 (journal): 5,358 Toadflax potion (unf) bought at 2,007 swapped between "Hold: sell at 2,048" and "held 8h+
+	 * ... sell at the market" every 10-70 s, because "the loss is less than an hour of holding" flips between a market of
+	 * 2,040 (loss 37.5k, an hour 35.5k: hold) and 2,041-2,042 (32k / 27k: sell). Null {@code next} (back at break-even, or
+	 * no prices): null.
+	 */
+	static Verdict steady(Verdict prev, long prevSince, Verdict next, long market, long now, long minMs)
+	{
+		if (prev == null || next == null || prev.hold == next.hold)
+		{
+			return next;
+		}
+		if (!next.hold && market > 0 && market < next.stop)
+		{
+			return next;              // under the week's lowest: the dip has become a fall - say so at once
+		}
+		return now - prevSince >= minMs ? next : prev;
+	}
+
+	/**
+	 * ⭐ THE PRICE A "REAL FALL" IS JUDGED ON (1.60.93): the market reading, or the last insta-buy ({@code lastBuy},
+	 * {@code lastBuyAgeMs} old) when that trade is higher and newer than {@code windowMs}. For {@link #steady}'s exception:
+	 * a reading under the week's lowest is not a fall while someone paid more than that inside the window. MEASURED
+	 * in-game 2026-11-10 10:08-10:19 (journal), 13,164 Ascension shards (break-even 745, the week's lowest 716): the
+	 * reading swapped between the last insta-buy (729; "the market now" while that trade is under 2 minutes old,
+	 * FlipEngine.LATEST_FRESH_S) and the 5-minute average (714) — the same swap as OfferAdvice.stayPastCap's — so the
+	 * verdict went Hold at 10:14:30, "sell at the market" at 10:14:50 (714 &lt; 716: "a fall, at once"), Hold at 10:19:47.
+	 * An unknown trade ({@code lastBuy} 0 or a negative age) = the market reading.
+	 */
+	static long fallPrice(long market, long lastBuy, long lastBuyAgeMs, long windowMs)
+	{
+		return lastBuy > market && lastBuyAgeMs >= 0 && lastBuyAgeMs < windowMs ? lastBuy : market;
+	}
+
+	/**
 	 * The verdict for {@code qty} of an item bought at {@code basis} each, worth {@code market} each now (the sell side),
 	 * from its hourly prices ({@code hourly}: the wiki's /timeseries 1h "data", oldest first) and the share of the last
 	 * day it reached the break-even ({@code dayShare}, -1 = from the hourly prices). Null when not under water or the

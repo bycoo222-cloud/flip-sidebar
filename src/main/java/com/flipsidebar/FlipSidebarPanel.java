@@ -1518,9 +1518,12 @@ class FlipSidebarPanel extends PluginPanel
 		boolean none = !buy && !sell;
 		boolean toAlch = buy && s.note != null && s.note.startsWith("High alch:");      // High alch mode's buy
 		String label = toAlch ? "Buy to alch" : buy ? "Buy" : sell ? "Sell" : "WAIT".equals(s.action) ? "Wait"
-			: "COLLECT".equals(s.action) ? "Collect" : "";
+			: "COLLECT".equals(s.action) ? "Collect" : OfferAdvice.CANCEL.equals(s.action) ? "Cancel"
+			: OfferAdvice.RAISE.equals(s.action) ? "Raise" : OfferAdvice.LOWER.equals(s.action) ? "Lower" : "";
 		cardAction.setText(label);
-		cardAction.setForeground(toAlch ? AMBER : buy ? GREEN : ORANGE);
+		// an offer step on the card (all slots in use: FlipBrain.waitStep) in the Offers list's colours
+		cardAction.setForeground(toAlch ? AMBER : buy ? GREEN : OfferAdvice.CANCEL.equals(s.action) ? RED
+			: OfferAdvice.RAISE.equals(s.action) || OfferAdvice.LOWER.equals(s.action) ? AMBER : ORANGE);
 		cardAction.setVisible(!label.isEmpty());
 		cardName.setText(wrap(none ? s.note : s.name));
 		cardName.setForeground(none ? DIM : WHITE);

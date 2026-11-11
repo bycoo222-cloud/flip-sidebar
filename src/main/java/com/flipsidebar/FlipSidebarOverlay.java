@@ -88,7 +88,9 @@ class FlipSidebarOverlay extends OverlayPanel
 			.color(config.alchMode() ? AMBER : ORANGE).build());
 		// one step at a time: an offer to cancel / re-price comes before the card's next offer (the highlight shows it)
 		OfferAdvice first = own == null && plugin.isGeOpen() && plugin.setupItem() <= 0 ? plugin.nextOfferStep() : null;
-		if (first != null)
+		// the card IS that step (all slots in use: FlipBrain.waitStep) - said once, not as "First:" and again below
+		boolean cardIsStep = first != null && first.verdict.equals(s.action) && first.offer.itemId == s.itemId;
+		if (first != null && !cardIsStep)
 		{
 			panelComponent.getChildren().add(LineComponent.builder()
 				.left("First: " + FlipSidebarPlugin.stepText(first))
@@ -98,10 +100,14 @@ class FlipSidebarOverlay extends OverlayPanel
 		if (!("BUY".equals(s.action) || "SELL".equals(s.action)))
 		{
 			// NONE, or all 8 slots in use: WAIT / COLLECT
-			String label = "WAIT".equals(s.action) ? "Wait" : "COLLECT".equals(s.action) ? "Collect" : null;
+			String label = "WAIT".equals(s.action) ? "Wait" : "COLLECT".equals(s.action) ? "Collect"
+				: OfferAdvice.CANCEL.equals(s.action) ? "Cancel" : OfferAdvice.RAISE.equals(s.action) ? "Raise"
+				: OfferAdvice.LOWER.equals(s.action) ? "Lower" : null;
 			if (label != null)
 			{
-				panelComponent.getChildren().add(LineComponent.builder().left(label).leftColor(ORANGE).build());
+				panelComponent.getChildren().add(LineComponent.builder().left(label)
+					.leftColor(OfferAdvice.CANCEL.equals(s.action) ? RED : OfferAdvice.RAISE.equals(s.action)
+						|| OfferAdvice.LOWER.equals(s.action) ? AMBER : ORANGE).build());
 			}
 			panelComponent.getChildren().add(LineComponent.builder()
 				.left(s.note == null || s.note.isEmpty() ? "Nothing worth doing right now" : s.note)

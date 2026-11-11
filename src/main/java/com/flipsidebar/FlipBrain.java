@@ -379,6 +379,8 @@ class FlipBrain
 	private volatile Map<Integer, double[]> reach = Map.of();
 	/** HoldOrSell's verdict for each held item under water (judgeHolds, the brain thread); an item not judged is absent. */
 	private volatile Map<Integer, HoldOrSell.Verdict> verdicts = Map.of();
+	/** When each item's verdict last switched between Hold and Sell (HoldOrSell.steady; judgeHolds, the brain thread). */
+	private final Map<Integer, Long> verdictSince = new HashMap<>();
 	/**
 	 * Parked holdings, item -> since (epoch ms) — STICKY (parkedNow). User, 2026-11-01: "it told me to hold law runes
 	 * ... then it decided that i was holding nature runes which i wasnt and now it switched back to law runes. needs to
@@ -502,6 +504,8 @@ class FlipBrain
 	 */
 	private final Map<Integer, long[]> firstBid = new HashMap<>();
 	private static final long FIRST_BID_GAP_MS = 10 * 60_000L;
+	/** Item -> {when its buy's market was last past the chase cap, the cap's base}: OfferAdvice.stayPastCap. */
+	private final Map<Integer, long[]> pastCap = new HashMap<>();
 	private final Set<Integer> sellSkipped = new HashSet<>();
 
 	private volatile Suggestion card;
@@ -585,6 +589,7 @@ class FlipBrain
 		soldAt.clear();
 		sellSkipped.clear();
 		south.clear();
+		pastCap.clear();
 	}
 
 	Suggestion card()
@@ -1869,6 +1874,8 @@ class FlipBrain
 	{
 		Map<Integer, HoldOrSell.Verdict> out = new HashMap<>();
 		Map<Integer, String> holdWhy = new HashMap<>();
+		Map<Integer, HoldOrSell.Verdict> before = verdicts;
+		long now = System.currentTimeMillis();
 		if (config.livePrices())
 		{
 			for (GameSnapshot.Holding h : s.holdings)
@@ -1885,8 +1892,20 @@ class FlipBrain
 				}
 				try
 				{
-					HoldOrSell.Verdict v = HoldOrSell.decide(prices.timeseries(h.itemId, "1h"), h.basis, h.qty, market, h.itemId,
-						reachOf(h.itemId, even), FlipEngine.ROI_GOAL_PCT_HOUR);
+					HoldOrSell.Verdict fresh = HoldOrSell.decide(prices.timeseries(h.itemId, "1h"), h.basis, h.qty, market,
+						h.itemId, reachOf(h.itemId, even), FlipEngine.ROI_GOAL_PCT_HOUR);
+					// a switch between Hold and Sell stands for a re-price window, so a 1-2 gp wiggle can't swap the advice
+					HoldOrSell.Verdict was = before.get(h.itemId);
+					// a fall is judged on the last insta-buy too while it is recent (HoldOrSell.fallPrice)
+					JsonObject lt = latestItem(String.valueOf(h.itemId));
+					long fallAt = HoldOrSell.fallPrice(market, lt == null ? 0 : Research.num(lt, "high"),
+						lt == null ? -1 : now - Research.num(lt, "highTime") * 1000, OfferAdvice.EMPTY_WINDOW_MS);
+					HoldOrSell.Verdict v = HoldOrSell.steady(was, verdictSince.getOrDefault(h.itemId, 0L), fresh, fallAt, now,
+						OfferAdvice.EMPTY_WINDOW_MS);
+					if (v != null && (was == null || was.hold != v.hold))
+					{
+						verdictSince.put(h.itemId, now);
+					}
 					if (v != null)
 					{
 						out.put(h.itemId, v);
@@ -1899,9 +1918,19 @@ class FlipBrain
 				catch (IOException | RuntimeException e)
 				{
 					log.debug("Flip Sidebar: no hold-or-sell for {}", h.itemId, e);
+					HoldOrSell.Verdict was = before.get(h.itemId);   // prices not got this time: the verdict shown stands
+					if (was != null)
+					{
+						out.put(h.itemId, was);
+						if (was.hold)
+						{
+							holdWhy.put(h.itemId, was.text);
+						}
+					}
 				}
 			}
 		}
+		verdictSince.keySet().retainAll(out.keySet());
 		verdicts = out;
 		OfferAdvice.holdWhy = holdWhy;
 	}
@@ -2445,12 +2474,21 @@ class FlipBrain
 		}
 		String ready = null;
 		long gain = 0;
+		long now = System.currentTimeMillis();
+		Set<Integer> busy = liveOfferItems();
 		for (GameSnapshot.Holding h : snap.holdings)
 		{
 			int have = snap.flipUnits(h.itemId);
+			// ⚠ only for an item the card WILL then offer to sell (1.60.89): in-game 2026-11-09 ~19:30 a 30.5m Dragon hunter
+			// crossbow buy was cancelled 8 times "to sell the held Super restore(4) (+191)" — on the user's own Hold, so the
+			// sell card skipped it and the card offered the crossbow buy again, round and round
+			if (noSellCard(h, have, busy, now))
+			{
+				continue;
+			}
 			long market = live(String.valueOf(h.itemId))[1];
 			long even = h.basis > 0 ? FlipEngine.breakEven(h.basis, h.itemId) : 0;
-			if (parked.containsKey(h.itemId) && have > 0 && even > 0 && market >= goal(h, even, System.currentTimeMillis()))
+			if (parked.containsKey(h.itemId) && even > 0 && market >= goal(h, even, now))
 			{
 				ready = h.name;
 				gain = (market - FlipEngine.tax(market, h.itemId) - h.basis) * Math.min(have, h.qty);
@@ -2555,6 +2593,48 @@ class FlipBrain
 	private static Map<Integer, Long> flipsInBank(GameSnapshot snap)
 	{
 		return snap == null ? Map.of() : snap.inBank;
+	}
+
+	/**
+	 * ⭐ ALL SLOTS IN USE, AN OFFER TO CANCEL OR RE-PRICE: that step is the card, not "Wait" (1.60.92). User, 2026-11-10,
+	 * with the box reading "CANCEL Uncut diamond (slot 5)" in red above "Wait - All 8 GE slots are in use": "this is
+	 * misleadding shouldnt it say cancel not wait." MEASURED (journal 21:40:02): the Uncut diamond buy (454 of 8,260 at
+	 * 2,224) was told CANCEL - "it no longer makes a profit after tax at any price that fills (sells for 2,250)" - while
+	 * the card said WAIT: the card is decided before the offer advice, and its all-slots branch only knew COLLECT. The
+	 * step is the one the highlight and the box's "First:" line follow (FlipSidebarPlugin.nextOfferStep): CANCEL before
+	 * RAISE / LOWER, the lowest slot first. Null when the card is not the all-slots "Wait" or no offer needs a change.
+	 */
+	static OfferAdvice waitStep(Suggestion card, List<OfferAdvice> adv)
+	{
+		if (card == null || !"WAIT".equals(card.action))
+		{
+			return null;
+		}
+		OfferAdvice best = null;
+		int bestRank = 9;
+		for (OfferAdvice a : adv)
+		{
+			int rank = OfferAdvice.CANCEL.equals(a.verdict) ? 1 : a.adjust() ? 2 : 9;
+			if (rank < bestRank || (rank == bestRank && rank < 9 && a.offer.slot < best.offer.slot))
+			{
+				best = a;
+				bestRank = rank;
+			}
+		}
+		return best;
+	}
+
+	/** The card for an offer step (waitStep): its verdict as the action, "Uncut diamond buy, slot 5" (+ " - to 1,234"). */
+	static Suggestion stepCard(OfferAdvice a, long asOfS)
+	{
+		Suggestion s = new Suggestion();
+		s.action = a.verdict;
+		s.itemId = a.offer.itemId;
+		s.name = a.offer.name;
+		String what = (a.offer.name == null ? "?" : a.offer.name) + (a.offer.buy ? " buy" : " sell") + ", slot " + a.offer.slot;
+		s.note = OfferAdvice.CANCEL.equals(a.verdict) || a.target <= 0 ? what : what + String.format(" - to %,d", a.target);
+		s.asOf = asOfS;
+		return s;
 	}
 
 	/** Each buy offer's item -> the price its buy was first placed at, kept in {@code memory} ({@link #firstBid}). */
@@ -3054,13 +3134,9 @@ class FlipBrain
 		return null;
 	}
 
-	/** The best thing to sell now: bought, in the inventory, not already on the GE. */
-	private SellRow sellCandidate(long now)
+	/** Items in a live GE offer (not finished, not cancelled, not ignored). Under the lock. */
+	private Set<Integer> liveOfferItems()
 	{
-		if (snap == null || hour == null)
-		{
-			return null;
-		}
 		Set<Integer> busy = new HashSet<>();
 		for (GameSnapshot.Offer o : snap.offers)
 		{
@@ -3073,26 +3149,47 @@ class FlipBrain
 				busy.add(o.itemId);
 			}
 		}
+		return busy;
+	}
+
+	/**
+	 * True when a holding gets NO sell card whatever its price — the one test shared by the sell card (sellCandidate) and
+	 * the slot it may free (freeSlotForHeld), so the two can never disagree (1.60.89). {@code have}: its flip units in the
+	 * inventory (GameSnapshot.flipUnits); {@code busy}: liveOfferItems. Under the lock.
+	 */
+	private boolean noSellCard(GameSnapshot.Holding h, int have, Set<Integer> busy, long now)
+	{
+		// ⚠ BOUGHT IS NOT HELD: only what is IN the inventory is a sell, capped at what is
+		// there. User, 2026-10-31: "it tells me to sell death runes i dont have in my invenotry." Never the player's
+		// OWN units taken out of the bank (GameSnapshot.flipUnits; 2026-11-05, their own Chaos runes got a sell card)
+		if (have <= 0 || busy.contains(h.itemId) || sellSkipped.contains(h.itemId)
+			|| now - soldAt.getOrDefault(h.itemId, 0L) <= SOLD_HOLD_MS)
+		{
+			return true;
+		}
+		// ⭐ the user's own HOLD (the card's Hold / Hold long-term) is never a sell card while held, in profit or not —
+		// unticking Hold brings it back (1.60.40). User, 2026-11-07, of a Craw's bow sell card at +269k with no Hold
+		// button: "what if i wanted to hold it" — "realistically player should be able to hold what ever they want".
+		// Until then a held item came back as a sell once its price was back at break-even. "Sell now at the
+		// market" (letGo) still outranks it.
+		return snap.held.contains(h.itemId) && !letGo.contains(h.itemId);
+	}
+
+	/** The best thing to sell now: bought, in the inventory, not already on the GE. */
+	private SellRow sellCandidate(long now)
+	{
+		if (snap == null || hour == null)
+		{
+			return null;
+		}
+		Set<Integer> busy = liveOfferItems();
 		SellRow top = null;
 		SellRow kept = null;
 		SellRow first = null;
 		for (GameSnapshot.Holding h : snap.holdings)
 		{
-			// ⚠ BOUGHT IS NOT HELD: only what is IN the inventory is a sell, capped at what is
-			// there. User, 2026-10-31: "it tells me to sell death runes i dont have in my invenotry." Never the player's
-			// OWN units taken out of the bank (GameSnapshot.flipUnits; 2026-11-05, their own Chaos runes got a sell card)
 			int have = snap.flipUnits(h.itemId);
-			if (have <= 0 || busy.contains(h.itemId) || sellSkipped.contains(h.itemId)
-				|| now - soldAt.getOrDefault(h.itemId, 0L) <= SOLD_HOLD_MS)
-			{
-				continue;
-			}
-			// ⭐ the user's own HOLD (the card's Hold / Hold long-term) is never a sell card while held, in profit or not —
-			// unticking Hold brings it back (1.60.40). User, 2026-11-07, of a Craw's bow sell card at +269k with no Hold
-			// button: "what if i wanted to hold it" — "realistically player should be able to hold what ever they want".
-			// Until then a held item came back as a sell once its price was back at break-even. "Sell now at the
-			// market" (letGo) still outranks it.
-			if (snap.held.contains(h.itemId) && !letGo.contains(h.itemId))
+			if (noSellCard(h, have, busy, now))
 			{
 				continue;
 			}
@@ -3387,15 +3484,15 @@ class FlipBrain
 			}
 		}
 		card = c;
-		journalCard(c, shownPick, shownSell);
 
 		// ⭐ no verdict until the averages AND the latest trades are in (or 30 s after the averages): at the start the
 		// averages came first and a buy got RAISE, then CANCEL the same second when the trades arrived (in-game 20:13:53)
 		boolean priced = live && five != null && hour != null && (latest != null || now - pricesAt > 30_000);
 		FlipEngine.dearFromTrades = config.dearFromTrades();
+		Map<Integer, Long> firsts = snap == null ? Map.of() : firstBids(firstBid, snap.offers, now);
 		List<OfferAdvice> adv = snap == null ? Collections.emptyList()
 			: OfferAdvice.advise(snap.offers, priced ? five : null, priced ? hour : null, priced ? latest : null, paid(snap, now),
-				firstBids(firstBid, snap.offers, now), ignored, config.adjustWindow().minutes * 60_000L, now);
+				firsts, ignored, config.adjustWindow().minutes * 60_000L, now);
 		south.values().removeIf(t -> now - t > SOUTH_MS);
 		for (OfferAdvice a : adv)
 		{
@@ -3407,6 +3504,17 @@ class FlipBrain
 		// once told CANCEL, a buy is not told RAISE within the hour (OfferAdvice.stayCancelled)
 		adv.replaceAll(a -> a.offer.buy && OfferAdvice.RAISE.equals(a.verdict) && south.containsKey(a.offer.itemId)
 			? OfferAdvice.stayCancelled(a, south.get(a.offer.itemId), now) : a);
+		// once its market went past the chase cap, a buy is not told RAISE for a re-price window (OfferAdvice.stayPastCap)
+		pastCap.values().removeIf(s -> now - s[0] >= OfferAdvice.EMPTY_WINDOW_MS);
+		for (OfferAdvice a : adv)
+		{
+			if (a.pastCap > 0)
+			{
+				pastCap.put(a.offer.itemId, new long[]{now, a.pastCap});
+			}
+		}
+		adv.replaceAll(a -> OfferAdvice.stayPastCap(a, pastCap.get(a.offer.itemId), firsts.getOrDefault(a.offer.itemId, 0L),
+			now, OfferAdvice.EMPTY_WINDOW_MS));
 		adv = freeSlotForHeld(adv, live);       // after "south": that cancel is not a fall
 		adv = alchHints(adv, live);
 		adv = alchBuys(adv, live);
@@ -3419,6 +3527,17 @@ class FlipBrain
 		{
 			adv.replaceAll(OfferAdvice::sellOnly);
 		}
+		// all slots in use and an offer to cancel or re-price: the card says that step, not "Wait" (waitStep)
+		OfferAdvice step = live && !config.alchMode() ? waitStep(c, adv) : null;
+		if (step != null)
+		{
+			c = stepCard(step, now / 1000);
+			hint = step.why;
+			card = c;
+		}
+		// journalled once, after the step: journalling the "Wait" first wrote both cards on every recompute (the dedupe
+		// key alternated - 1,360 of 7,206 journal lines on 2026-11-11)
+		journalCard(c, shownPick, shownSell);
 		journalAdvice(adv);
 		List<Pick> next = new ArrayList<>();
 		for (Pick p : config.sellOnly() ? List.<Pick>of() : pool())
