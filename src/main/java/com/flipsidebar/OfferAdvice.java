@@ -122,6 +122,11 @@ final class OfferAdvice
 	 * buy was placed); 0 = not. FlipBrain remembers it for {@link #stayPastCap}.
 	 */
 	long pastCap;
+	/**
+	 * A buy's plain WAIT with the market at or over its bid but under the raise step ("market +0.0% of your bid"); false
+	 * for every other WAIT. FlipBrain may keep an earlier RAISE in its place ({@link #stayRaised}).
+	 */
+	boolean atBid;
 
 	private OfferAdvice(GameSnapshot.Offer offer, String verdict, long target, String why)
 	{
@@ -394,8 +399,10 @@ final class OfferAdvice
 			return new OfferAdvice(o, WAIT, o.price, String.format("%smarket %+.1f%% - give it the re-price window",
 				part, drift * 100));
 		}
-		return new OfferAdvice(o, WAIT, o.price, String.format("%smarket %+.1f%% of your %s", part, drift * 100,
+		OfferAdvice plain = new OfferAdvice(o, WAIT, o.price, String.format("%smarket %+.1f%% of your %s", part, drift * 100,
 			o.buy ? "bid" : "ask"));
+		plain.atBid = o.buy && market >= o.price;
+		return plain;
 	}
 
 	/**
@@ -503,6 +510,32 @@ final class OfferAdvice
 			FlipSidebarSlotOverlay.clock(nowMs - seen[0])));
 		c.expected = a.expected;
 		return c;
+	}
+
+	/**
+	 * ⭐ A RAISE STANDS FOR A RE-PRICE WINDOW (1.60.96). {@code said} = {when a buy was last told RAISE, its price then,
+	 * the price it was told to raise to}, or null. A plain WAIT on the same buy at the same price ({@link #atBid}: the
+	 * reading back at the bid, not under it) less than {@code minMs} after that is that RAISE again. Why: the swap
+	 * {@link #stayPastCap} describes, inside the cap — "the market now" is the last trade while it is under 2 minutes old
+	 * (FlipEngine.LATEST_FRESH_S), then the 5-minute average, which runs behind it. MEASURED in-game 2026-11-11 (journal):
+	 * 13,000 Bow string bid 151, placed 19:35:03, last insta-sell 152, 5-minute average 151 — RAISE to 152 at 19:35:07 (that
+	 * trade 114 s old), WAIT "+0.0% of your bid" at 19:35:14 (121 s old), RAISE at 19:35:28 (the average reached 152);
+	 * 11,000 Cannonball bid 232 the same at 19:02:40, 19:03:41 and 19:04:43. Any other WAIT (past the cap, waiting for
+	 * prices, a new offer whose raise would not pay) is left alone, and stayCancelled / stayPastCap still decide after
+	 * this. After the window, or once the offer is re-priced, it is judged anew.
+	 */
+	static OfferAdvice stayRaised(OfferAdvice a, long[] said, long nowMs, long minMs)
+	{
+		GameSnapshot.Offer o = a.offer;
+		if (said == null || !o.buy || !a.atBid || o.price != said[1] || said[2] <= o.price || nowMs - said[0] >= minMs)
+		{
+			return a;
+		}
+		String part = o.filled > 0 ? String.format("%,d/%,d filled · ", o.filled, o.total) : "";
+		OfferAdvice r = new OfferAdvice(o, RAISE, said[2], String.format("%smarket %+.1f%% - your bid is behind (said %s ago)",
+			part, (said[2] - o.price) * 100.0 / o.price, FlipSidebarSlotOverlay.clock(nowMs - said[0])));
+		r.expected = a.expected;
+		return r;
 	}
 
 	/**

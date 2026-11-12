@@ -113,4 +113,63 @@ public class OfferAdviceTest
 		OfferAdvice wait = at(T0117, 60);
 		assertSame("only a RAISE is held", wait, OfferAdvice.stayPastCap(wait, SEEN, 60, T0118, WINDOW));
 	}
+
+	// OfferAdvice.stayRaised (1.60.96), the in-game case of 2026-11-11 19:35 (journal): 13,000 Bow string bid 151, placed
+	// 19:35:03; 5-minute average insta-sell 151, insta-buy 160; the last insta-sell 152 at 19:33:13.
+	private static final int BOW_STRING = 1777;
+	private static final long BS_PLACED = 1_794_443_703_444L, BS_RAISE = 1_794_443_707_937L, BS_WAIT = 1_794_443_714_253L;
+
+	private static OfferAdvice bowString(long price, long nowMs)
+	{
+		GameSnapshot.Offer bid = new GameSnapshot.Offer(6, true, BOW_STRING, "Bow string", price, 13_000, 0, false, false,
+			BS_PLACED, 0);
+		JsonObject five = obj("{\"1777\":{\"avgHighPrice\":160,\"highPriceVolume\":9858,\"avgLowPrice\":151,\"lowPriceVolume\":3000}}");
+		JsonObject hour = obj("{\"1777\":{\"avgHighPrice\":160,\"avgLowPrice\":156}}");
+		JsonObject latest = obj("{\"1777\":{\"high\":160,\"highTime\":1794443632,\"low\":152,\"lowTime\":1794443593}}");
+		Set<Integer> was = FlipEngine.proven;
+		FlipEngine.proven = Set.of(BOW_STRING);       // setup: proven, as it was that day
+		try
+		{
+			return OfferAdvice.advise(List.of(bid), five, hour, latest, Map.of(), Map.of(), Set.of(), WINDOW, nowMs).get(0);
+		}
+		finally
+		{
+			FlipEngine.proven = was;
+		}
+	}
+
+	@Test
+	public void theRaiseCameAndWentOnOneTrade()
+	{
+		// what happened: the 152 trade 114 s old - RAISE to 152; 121 s old - the 5-minute average, 151: WAIT (the bug)
+		OfferAdvice raise = bowString(151, BS_RAISE);
+		assertEquals(OfferAdvice.RAISE, raise.verdict);
+		assertEquals(152, raise.target);
+		OfferAdvice wait = bowString(151, BS_WAIT);
+		assertEquals(OfferAdvice.WAIT, wait.verdict);
+		assertTrue(wait.why, wait.atBid);
+	}
+
+	@Test
+	public void theRaiseStandsInsideTheWindow()
+	{
+		OfferAdvice a = OfferAdvice.stayRaised(bowString(151, BS_WAIT), new long[]{BS_RAISE, 151, 152}, BS_WAIT, WINDOW);
+		assertEquals(OfferAdvice.RAISE, a.verdict);
+		assertEquals(152, a.target);
+		assertEquals("market +0.7% - your bid is behind (said 6s ago)", a.why);
+	}
+
+	@Test
+	public void theRaiseIsNotKeptWhenItShouldNotBe()
+	{
+		long[] said = {BS_RAISE, 151, 152};
+		OfferAdvice wait = bowString(151, BS_WAIT);
+		assertSame("after the window", wait, OfferAdvice.stayRaised(wait, said, BS_RAISE + WINDOW, WINDOW));
+		assertSame("never told to raise", wait, OfferAdvice.stayRaised(wait, null, BS_WAIT, WINDOW));
+		OfferAdvice raisedTo = bowString(152, BS_WAIT);
+		assertSame("re-priced: the offer is at 152 now", raisedTo, OfferAdvice.stayRaised(raisedTo, said, BS_WAIT, WINDOW));
+		OfferAdvice pastCap = at(T0117, 60);
+		assertSame("a past-the-cap WAIT is not a plain one", pastCap,
+			OfferAdvice.stayRaised(pastCap, new long[]{T0117 - MIN, 60, 61}, T0117, WINDOW));
+	}
 }

@@ -506,6 +506,8 @@ class FlipBrain
 	private static final long FIRST_BID_GAP_MS = 10 * 60_000L;
 	/** Item -> {when its buy's market was last past the chase cap, the cap's base}: OfferAdvice.stayPastCap. */
 	private final Map<Integer, long[]> pastCap = new HashMap<>();
+	/** Item -> {when its buy was last told RAISE, the buy's price then, the price to raise to}: OfferAdvice.stayRaised. */
+	private final Map<Integer, long[]> raised = new HashMap<>();
 	private final Set<Integer> sellSkipped = new HashSet<>();
 
 	private volatile Suggestion card;
@@ -590,6 +592,7 @@ class FlipBrain
 		sellSkipped.clear();
 		south.clear();
 		pastCap.clear();
+		raised.clear();
 	}
 
 	Suggestion card()
@@ -3501,6 +3504,17 @@ class FlipBrain
 				south.putIfAbsent(a.offer.itemId, now);
 			}
 		}
+		// once told RAISE, a buy stays told for a re-price window while the reading is back at its bid (OfferAdvice.stayRaised)
+		// - before stayCancelled and stayPastCap, which still turn it into a CANCEL or a "not raised" WAIT
+		raised.values().removeIf(s -> now - s[0] >= OfferAdvice.EMPTY_WINDOW_MS);
+		for (OfferAdvice a : adv)
+		{
+			if (a.offer.buy && OfferAdvice.RAISE.equals(a.verdict))
+			{
+				raised.put(a.offer.itemId, new long[]{now, a.offer.price, a.target});
+			}
+		}
+		adv.replaceAll(a -> OfferAdvice.stayRaised(a, raised.get(a.offer.itemId), now, OfferAdvice.EMPTY_WINDOW_MS));
 		// once told CANCEL, a buy is not told RAISE within the hour (OfferAdvice.stayCancelled)
 		adv.replaceAll(a -> a.offer.buy && OfferAdvice.RAISE.equals(a.verdict) && south.containsKey(a.offer.itemId)
 			? OfferAdvice.stayCancelled(a, south.get(a.offer.itemId), now) : a);
