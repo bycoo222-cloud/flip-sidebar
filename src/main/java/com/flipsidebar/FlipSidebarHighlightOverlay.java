@@ -425,7 +425,14 @@ class FlipSidebarHighlightOverlay extends Overlay
 		return null;
 	}
 
-	/** The item to sell in the GE's side inventory (noted or not — matched by name). */
+	/**
+	 * The item to sell in the GE's side inventory, noted or not. ⚠ A NOTE has its own item id (1.60.94): 11,000 Mahogany logs
+	 * collected from the GE came as notes (ItemID.Cert.MAHOGANY_LOGS = 8836) while the card's item is 6332, and the user saw
+	 * the empty slot's Sell arrow lit instead of the logs (2026-11-10, screenshot: "its highilighting the sell button and not
+	 * the sell item. it was better before"). Matched by the canonical id (ItemManager.canonicalize: note / placeholder → the
+	 * item, from the game's own item definitions), then by name. Never "id + 1": MEASURED in RuneLite 1.13.6's gameval, 217
+	 * of 4,730 notes are not their item's id + 1 — Mahogany logs among them.
+	 */
 	private Widget inventoryItem(int itemId)
 	{
 		Widget items = client.getWidget(InterfaceID.GeOffersSide.ITEMS);
@@ -436,7 +443,8 @@ class FlipSidebarHighlightOverlay extends Overlay
 		String want = plugin.itemName(itemId);
 		for (Widget w : items.getDynamicChildren())
 		{
-			if (w.getItemId() == itemId || (want != null && want.equals(plugin.itemName(w.getItemId()))))
+			if (w.getItemId() == itemId || (w.getItemId() > 0 && plugin.canonical(w.getItemId()) == itemId)
+				|| (want != null && want.equals(plugin.itemName(w.getItemId()))))
 			{
 				return w;
 			}
