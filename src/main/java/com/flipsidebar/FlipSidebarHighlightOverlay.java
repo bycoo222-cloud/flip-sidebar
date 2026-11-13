@@ -108,6 +108,17 @@ class FlipSidebarHighlightOverlay extends Overlay
 	 */
 	private int allItem = -1;
 	private int allFromQuantity;
+	/**
+	 * What this frame lit, for the trade journal's "highlight" line (1.60.97): one "colour where[child] item N @x,y" per box,
+	 * built in {@link #draw(Graphics2D, Widget, Color, Color)} from numbers only. Why: the journal had the card and the
+	 * offers but not what the overlay pointed at, so a wrong highlight (the 1.60.94 noted logs) could only be seen by the
+	 * user. Written when it changes and has held {@link #LIT_STEADY_MS}, so a box that blinks while the GE redraws is not a line.
+	 */
+	private final StringBuilder lit = new StringBuilder();
+	private String litSeen = "";
+	private String litSaid = "";
+	private long litSince;
+	private static final long LIT_STEADY_MS = 300;
 
 	@Inject
 	FlipSidebarHighlightOverlay(Client client, FlipSidebarPlugin plugin, FlipSidebarConfig config)
@@ -123,15 +134,41 @@ class FlipSidebarHighlightOverlay extends Overlay
 	@Override
 	public Dimension render(Graphics2D g)
 	{
+		lit.setLength(0);
+		steps(g);
+		noteLit();
+		return null;
+	}
+
+	/** The journal's "highlight" line: what is lit now, once it has stayed the same for {@link #LIT_STEADY_MS}. */
+	private void noteLit()
+	{
+		long now = System.currentTimeMillis();
+		if (!litSeen.contentEquals(lit))
+		{
+			litSeen = lit.toString();
+			litSince = now;
+			return;
+		}
+		if (!litSeen.equals(litSaid) && now - litSince >= LIT_STEADY_MS)
+		{
+			litSaid = litSeen;
+			plugin.journalHighlight(litSaid);
+		}
+	}
+
+	/** The highlights for one frame (everything {@link #render} used to do). */
+	private void steps(Graphics2D g)
+	{
 		if (!config.highlight() || plugin.guidanceOff() || !plugin.isGeOpen())
 		{
-			return null;              // paused: nothing highlighted at all
+			return;              // paused: nothing highlighted at all
 		}
 		FlipSidebarPlugin.Modify m = plugin.modifying();
 		if (m != null)
 		{
 			drawModify(g, m);         // re-placing an offer: the card's highlights would lead away from it
-			return null;
+			return;
 		}
 		// ONE step at a time: a cancel, else a re-price, before the card's next offer is started
 		boolean offerFirst = drawOfferActions(g);
@@ -149,7 +186,7 @@ class FlipSidebarHighlightOverlay extends Overlay
 			{
 				draw(g, plugin.filledSearchRow());
 			}
-			return null;
+			return;
 		}
 
 		// the set-up screen is open when its Confirm button is on screen
@@ -160,22 +197,22 @@ class FlipSidebarHighlightOverlay extends Overlay
 			allItem = -1;             // set-up closed: the next one may use All again
 			if (offerFirst)
 			{
-				return null;          // the offer to cancel / re-price first; the card's next offer after it
+				return;          // the offer to cancel / re-price first; the card's next offer after it
 			}
 			if (s != null && "COLLECT".equals(s.action))
 			{
 				draw(g, withOption(client.getWidget(InterfaceID.GeOffers.COLLECTALL), COLLECT));
-				return null;
+				return;
 			}
 			if (!cardOffer)
 			{
-				return null;          // WAIT, or nothing worth doing
+				return;          // WAIT, or nothing worth doing
 			}
 			// a SELL starts from the item in the inventory: clicking it opens the sell offer itself
 			// (user, 2026-10-31: "should highlight the item in the inventory not the sell button")
 			Widget item = buy ? null : inventoryItem(s.itemId);
 			draw(g, item != null ? item : emptySlotArrow(buy));
-			return null;
+			return;
 		}
 
 		// the set-up screen: filled in for the card — or for the user's own pick, priced for it
@@ -186,16 +223,16 @@ class FlipSidebarHighlightOverlay extends Overlay
 			{
 				drawFill(g, setup, confirm, o);
 			}
-			return null;
+			return;
 		}
 		int item = client.getVarpValue(VarPlayerID.TRADINGPOST_SEARCH);
 		boolean sellOffer = client.getVarbitValue(VarbitID.GE_NEWOFFER_TYPE) == OFFER_TYPE_SELL;
 		if (!cardOffer || sellOffer == buy || (item > 0 && config.livePrices()))
 		{
-			return null;              // another kind of offer, or the user's own pick still being priced
+			return;              // another kind of offer, or the user's own pick still being priced
 		}
 		draw(g, buy ? setup.getChild(SETUP_ITEM_SEARCH) : inventoryItem(s.itemId));
-		return null;
+		return;
 	}
 
 	/** Quantity "..." and price "..." until they match, then Confirm. */
@@ -477,5 +514,47 @@ class FlipSidebarHighlightOverlay extends Overlay
 		g.setColor(edge);
 		g.setStroke(new BasicStroke(2));
 		g.draw(r);
+		if (lit.length() > 0)
+		{
+			lit.append("; ");
+		}
+		lit.append(fill == CANCEL_FILL ? "red " : fill == RAISE_FILL ? "amber " : fill == COLLECT_FILL ? "green " : "blue ");
+		appendWhere(w);
+		lit.append(" @").append(r.x).append(',').append(r.y);
+	}
+
+	/** A box's place for the journal: "inventory[5] item 8836", "slot 3[1]", "set-up[58]"; else the widget's group.child. */
+	private void appendWhere(Widget w)
+	{
+		int id = w.getId();
+		String name = id == InterfaceID.GeOffersSide.ITEMS ? "inventory"
+			: id == InterfaceID.GeOffers.SETUP ? "set-up"
+			: id == InterfaceID.GeOffers.COLLECTALL ? "Collect all"
+			: id == InterfaceID.GeOffers.DETAILS_COLLECT ? "offer collect"
+			: id == InterfaceID.Chatbox.MES_LAYER_SCROLLCONTENTS ? "search" : null;
+		for (int i = 0; name == null && i < SLOTS.length; i++)
+		{
+			if (SLOTS[i] == id)
+			{
+				lit.append("slot ").append(i + 1);
+				name = "";
+			}
+		}
+		if (name == null)
+		{
+			lit.append(id >>> 16).append('.').append(id & 0xFFFF);
+		}
+		else
+		{
+			lit.append(name);
+		}
+		if (w.getIndex() >= 0)
+		{
+			lit.append('[').append(w.getIndex()).append(']');
+		}
+		if (w.getItemId() > 0)
+		{
+			lit.append(" item ").append(w.getItemId());
+		}
 	}
 }

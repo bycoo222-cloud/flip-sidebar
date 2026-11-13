@@ -2637,6 +2637,34 @@ public class FlipSidebarPlugin extends Plugin
 		j.log("menu", o);
 	}
 
+	/**
+	 * The GE highlights changed (FlipSidebarHighlightOverlay.noteLit, 1.60.97): what is lit now ("none" = nothing), and
+	 * the card and re-pricing it is for. A sell's box on "inventory[..] item N" with N the note's id is the 1.60.94 fix
+	 * working; "slot N[1]" (the Sell arrow) on a sell card means the item was not found in the inventory.
+	 */
+	void journalHighlight(String lit)
+	{
+		TradeJournal j = journal;
+		if (j == null)
+		{
+			return;
+		}
+		JsonObject o = new JsonObject();
+		o.addProperty("lit", lit.isEmpty() ? "none" : lit);
+		Suggestion s = getSuggestion();
+		if (s != null)
+		{
+			o.addProperty("card", s.action);
+			o.addProperty("item", s.itemId);
+		}
+		Modify m = modifying();
+		if (m != null)
+		{
+			o.addProperty("modify", m.itemId);
+		}
+		j.log("highlight", o);
+	}
+
 	/** One journal event about an item, with the market for it now. */
 	private void journalItem(String event, int itemId, Consumer<JsonObject> fill)
 	{
