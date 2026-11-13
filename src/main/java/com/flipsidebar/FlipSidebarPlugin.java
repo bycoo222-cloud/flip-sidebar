@@ -1127,6 +1127,15 @@ public class FlipSidebarPlugin extends Plugin
 
 	// ── the optional fill key ───────────────────────────────────────────────────
 
+	/**
+	 * A GE quantity or price box is open (read from its title every game tick and on each chat-mode change, so it cannot
+	 * stay set after the box closes). The highlights wait while it is (FlipSidebarHighlightOverlay.drawFill). Client thread.
+	 */
+	boolean numberBoxOpen()
+	{
+		return prompt != PROMPT_NONE;
+	}
+
 	private void updatePrompt()
 	{
 		Widget title = client.getWidget(InterfaceID.Chatbox.MES_TEXT);

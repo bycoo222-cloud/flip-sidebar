@@ -201,9 +201,9 @@ class FlipSidebarHighlightOverlay extends Overlay
 	/** Quantity "..." and price "..." until they match, then Confirm. */
 	private void drawFill(Graphics2D g, Widget setup, Widget confirm, Suggestion o)
 	{
-		if (plugin.settling())
+		if (plugin.settling() || plugin.numberBoxOpen())
 		{
-			return;                   // the number just entered is not on the set-up screen yet
+			return;                   // the number just entered is not on the set-up screen yet, or a box is open (see below)
 		}
 		// a sell asks for no more than is held (FlipSidebarPlugin.setupQuantity) — the game does not take more, and
 		// this would never match
@@ -211,15 +211,18 @@ class FlipSidebarHighlightOverlay extends Overlay
 		long want = plugin.setupQuantity(o.quantity, sell, o.itemId);
 		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == want;
 		boolean priceOk = client.getVarpLongValue(VarPlayerID.GE_NEWOFFER_PRICE) == o.price;
+		// ONE BOX AT A TIME: the quantity, then the price, then Confirm (before, quantity and price were lit together).
+		// And none while a quantity or price box is open: what comes next there is the number, never "..." again — a
+		// "..." left lit with its box open was clicked a second time, and the number typed next never showed in the box.
 		if (!quantityOk)
 		{
 			draw(g, quantityButton(setup, sell, o.itemId, want));
 		}
-		if (!priceOk)
+		else if (!priceOk)
 		{
 			draw(g, setup.getChild(SETUP_PRICE_CUSTOM));
 		}
-		if (quantityOk && priceOk)
+		else
 		{
 			draw(g, confirm);
 		}
@@ -319,22 +322,23 @@ class FlipSidebarHighlightOverlay extends Overlay
 	private void drawModify(Graphics2D g, FlipSidebarPlugin.Modify m)
 	{
 		Widget setup = client.getWidget(InterfaceID.GeOffers.SETUP);
-		if (setup == null || plugin.settling())
+		if (setup == null || plugin.settling() || plugin.numberBoxOpen())
 		{
-			return;                   // settling: the number just entered is not on the set-up screen yet
+			return;                   // settling: the number just entered is not on the set-up screen yet; or a box is open
 		}
 		boolean priceOk = m.target <= 0 || client.getVarpLongValue(VarPlayerID.GE_NEWOFFER_PRICE) == m.target;
 		long want = plugin.setupQuantity(m.quantity, !m.buy, m.itemId);
 		boolean quantityOk = client.getVarbitValue(VarbitID.GE_NEWOFFER_QUANTITY) == want;
+		// one box at a time, as drawFill: the price, then the quantity, then Confirm
 		if (!priceOk)
 		{
 			draw(g, setup.getChild(SETUP_PRICE_CUSTOM), RAISE_FILL, RAISE_EDGE);
 		}
-		if (!quantityOk)
+		else if (!quantityOk)
 		{
 			draw(g, quantityButton(setup, !m.buy, m.itemId, want), RAISE_FILL, RAISE_EDGE);
 		}
-		if (priceOk && quantityOk)
+		else
 		{
 			draw(g, setup.getChild(SETUP_CONFIRM), RAISE_FILL, RAISE_EDGE);
 		}
